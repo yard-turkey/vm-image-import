@@ -15059,6 +15059,7 @@ func schema_pkg_apis_core_v1beta1_DataVolumeSourceGCS(ref common.ReferenceCallba
 					"url": {
 						SchemaProps: spec.SchemaProps{
 							Description: "URL is the url of the GCS source",
+							Default:     "",
 							Type:        []string{"string"},
 							Format:      "",
 						},

@@ -3846,7 +3846,8 @@
     "properties": {
      "url": {
       "description": "URL is the url of the GCS source",
-      "type": "string"
+      "type": "string",
+      "default": ""
      }
     }
    },
