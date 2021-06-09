@@ -444,9 +444,7 @@ github.com/vmware/govmomi/vim25/types
 github.com/vmware/govmomi/vim25/xml
 # go.etcd.io/bbolt v1.3.5
 go.etcd.io/bbolt
-<<<<<<< HEAD
 # go.uber.org/atomic v1.6.0
-=======
 # go.mongodb.org/mongo-driver v1.1.2
 go.mongodb.org/mongo-driver/bson
 go.mongodb.org/mongo-driver/bson/bsoncodec
@@ -472,7 +470,6 @@ go.opencensus.io/trace/internal
 go.opencensus.io/trace/propagation
 go.opencensus.io/trace/tracestate
 # go.uber.org/atomic v1.5.0
->>>>>>> 4192b1f7 (Build and vendor files for CDI Google Cloud Storage support)
 go.uber.org/atomic
 # go.uber.org/multierr v1.5.0
 go.uber.org/multierr
@@ -504,22 +501,16 @@ golang.org/x/net/idna
 golang.org/x/net/internal/socks
 golang.org/x/net/internal/timeseries
 golang.org/x/net/proxy
-<<<<<<< HEAD
 # golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d
-=======
 golang.org/x/net/trace
 # golang.org/x/oauth2 v0.0.0-20190604053449-0f29369cfe45
->>>>>>> 4192b1f7 (Build and vendor files for CDI Google Cloud Storage support)
 golang.org/x/oauth2
 golang.org/x/oauth2/google
 golang.org/x/oauth2/internal
-<<<<<<< HEAD
 # golang.org/x/sys v0.0.0-20201112073958-5cba982894dd
-=======
 golang.org/x/oauth2/jws
 golang.org/x/oauth2/jwt
 # golang.org/x/sys v0.0.0-20200930185726-fdedc70b468f
->>>>>>> 4192b1f7 (Build and vendor files for CDI Google Cloud Storage support)
 ## explicit
 golang.org/x/sys/internal/unsafeheader
 golang.org/x/sys/unix
@@ -564,9 +555,7 @@ golang.org/x/xerrors
 golang.org/x/xerrors/internal
 # gomodules.xyz/jsonpatch/v2 v2.1.0
 gomodules.xyz/jsonpatch/v2
-<<<<<<< HEAD
 # google.golang.org/appengine v1.6.6
-=======
 # google.golang.org/api v0.4.0
 google.golang.org/api/gensupport
 google.golang.org/api/googleapi
@@ -580,7 +569,6 @@ google.golang.org/api/transport/http
 google.golang.org/api/transport/http/internal/propagation
 # google.golang.org/appengine v1.5.0
 google.golang.org/appengine
->>>>>>> 4192b1f7 (Build and vendor files for CDI Google Cloud Storage support)
 google.golang.org/appengine/internal
 google.golang.org/appengine/internal/app_identity
 google.golang.org/appengine/internal/base
@@ -590,9 +578,7 @@ google.golang.org/appengine/internal/modules
 google.golang.org/appengine/internal/remote_api
 google.golang.org/appengine/internal/urlfetch
 google.golang.org/appengine/urlfetch
-<<<<<<< HEAD
 # google.golang.org/protobuf v1.25.0
-=======
 # google.golang.org/genproto v0.0.0-20191220175831-5c49e3ecc1c1
 google.golang.org/genproto/googleapis/api/annotations
 google.golang.org/genproto/googleapis/iam/v1
@@ -637,7 +623,6 @@ google.golang.org/grpc/stats
 google.golang.org/grpc/status
 google.golang.org/grpc/tap
 # google.golang.org/protobuf v1.23.0
->>>>>>> 4192b1f7 (Build and vendor files for CDI Google Cloud Storage support)
 google.golang.org/protobuf/encoding/prototext
 google.golang.org/protobuf/encoding/protowire
 google.golang.org/protobuf/internal/descfmt
