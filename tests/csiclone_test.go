@@ -3,7 +3,6 @@ package tests
 import (
 	"context"
 	"fmt"
-	"k8s.io/apimachinery/pkg/types"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -11,8 +10,6 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	"kubevirt.io/containerized-data-importer/pkg/controller"
 	"kubevirt.io/containerized-data-importer/tests/framework"
 	"kubevirt.io/containerized-data-importer/tests/utils"
@@ -28,55 +25,27 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component][crit:high] CSI Vol
 	fillCommandFilesystem := "echo -n \"" + fillData + "\" >> " + testFile
 
 	f := framework.NewFramework("dv-func-test")
-	getStorageProfileSpec := func(storageClassName string) *cdiv1.StorageProfileSpec {
-		storageProfile, err := f.CdiClient.CdiV1beta1().StorageProfiles().Get(context.TODO(), storageClassName, metav1.GetOptions{})
-		Expect(err).ToNot(HaveOccurred())
-		By(fmt.Sprintf("inside Got original storage profile.spec: %v", storageProfile.Spec))
-
-		originalProfileSpec := storageProfile.Spec.DeepCopy()
-		return originalProfileSpec
-	}
-
-	updateStorageProfileSpec := func(client client.Client, name string, spec cdiv1.StorageProfileSpec) {
-		storageProfile := &cdiv1.StorageProfile{}
-		err := client.Get(context.TODO(), types.NamespacedName{Name: name}, storageProfile)
-		Expect(err).ToNot(HaveOccurred())
-		storageProfile.Spec = spec
-		err = client.Update(context.TODO(), storageProfile)
-		Expect(err).ToNot(HaveOccurred())
-	}
-
-	configureCloneStrategy := func(client client.Client,
-		storageClassName string,
-		spec *cdiv1.StorageProfileSpec) {
-
-		cloneStrategyCsiClone := cdiv1.CDICloneStrategy(cdiv1.CloneStrategyCsiClone)
-		newProfileSpec := updateCloneStrategy(spec, cloneStrategyCsiClone)
-		updateStorageProfileSpec(client, storageClassName, *newProfileSpec)
-
-		Eventually(func() *cdiv1.CDICloneStrategy {
-			profile, err := f.CdiClient.CdiV1beta1().StorageProfiles().Get(context.TODO(), storageClassName, metav1.GetOptions{})
-			Expect(err).ToNot(HaveOccurred())
-			if len(profile.Status.ClaimPropertySets) > 0 {
-				return profile.Status.ClaimPropertySets[0].CloneStrategy
-			}
-			return nil
-		}, time.Second*30, time.Second).Should(Equal(&cloneStrategyCsiClone))
-	}
 
 	BeforeEach(func() {
-		cloneStorageClassName := f.CsiCloneSCName
-		By(fmt.Sprintf("Get original storage profile: %s", cloneStorageClassName))
+		if f.IsCSIVolumeCloneStorageClassAvailable() {
 
-		originalProfileSpec = getStorageProfileSpec(cloneStorageClassName)
-		By(fmt.Sprintf("Got original storage profile: %v", originalProfileSpec))
+			cloneStorageClassName := f.CsiCloneSCName
+			By(fmt.Sprintf("Get original storage profile: %s", cloneStorageClassName))
+
+			spec, err := utils.GetStorageProfileSpec(f.CdiClient, cloneStorageClassName)
+			originalProfileSpec = spec
+			Expect(err).ToNot(HaveOccurred())
+			By(fmt.Sprintf("Got original storage profile: %v", originalProfileSpec))
+		}
 
 	})
 
 	AfterEach(func() {
-		cloneStorageClassName := f.CsiCloneSCName
-		By("Restore the profile")
-		updateStorageProfileSpec(f.CrClient, cloneStorageClassName, *originalProfileSpec)
+		if originalProfileSpec != nil {
+			cloneStorageClassName := f.CsiCloneSCName
+			By("Restore the profile")
+			utils.UpdateStorageProfile(f.CrClient, cloneStorageClassName, *originalProfileSpec)
+		}
 	})
 
 	It("Verify DataVolume CSI Volume Cloning - volumeMode filesystem - Positive flow", func() {
@@ -85,7 +54,7 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component][crit:high] CSI Vol
 		}
 
 		By(fmt.Sprintf("configure storage profile %s", f.CsiCloneSCName))
-		configureCloneStrategy(f.CrClient, f.CsiCloneSCName, originalProfileSpec)
+		utils.ConfigureCloneStrategy(f.CrClient, f.CdiClient, f.CsiCloneSCName, originalProfileSpec, cdiv1.CloneStrategyCsiClone)
 
 		dataVolume, md5 := createDataVolume("dv-csi-clone-test-1", fillCommandFilesystem, v1.PersistentVolumeFilesystem, f.CsiCloneSCName, f)
 		verifyEvent(string(cdiv1.CSICloneInProgress), dataVolume.Namespace, f)
@@ -96,13 +65,13 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component][crit:high] CSI Vol
 		verifyPVC(dataVolume, f, testFile, md5)
 	})
 
-	It("Verify DataVolume Smart Cloning - volumeMode block - Positive flow", func() {
+	It("Verify DataVolume CSI Cloning - volumeMode block - Positive flow", func() {
 		if !f.IsCSIVolumeCloneStorageClassAvailable() {
 			Skip("CSI Volume Clone is not applicable")
 		}
 
 		By(fmt.Sprintf("configure storage profile %s", f.CsiCloneSCName))
-		configureCloneStrategy(f.CrClient, f.CsiCloneSCName, originalProfileSpec)
+		utils.ConfigureCloneStrategy(f.CrClient, f.CdiClient, f.CsiCloneSCName, originalProfileSpec, cdiv1.CloneStrategyCsiClone)
 
 		dataVolume, expectedMd5 := createDataVolume("dv-csi-clone-test-1", utils.DefaultPvcMountPath, v1.PersistentVolumeBlock, f.CsiCloneSCName, f)
 		verifyEvent(controller.CSICloneInProgress, dataVolume.Namespace, f)
@@ -113,13 +82,13 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component][crit:high] CSI Vol
 		verifyPVC(dataVolume, f, utils.DefaultPvcMountPath, expectedMd5)
 	})
 
-	It("Verify DataVolume Smart Cloning - volumeMode filesystem - Waits for source to be available", func() {
-		if !f.IsSnapshotStorageClassAvailable() {
-			Skip("Smart Clone is not applicable")
+	It("Verify DataVolume CSI Cloning - volumeMode filesystem - Waits for source to be available", func() {
+		if !f.IsCSIVolumeCloneStorageClassAvailable() {
+			Skip("CSI Volume Clone is not applicable")
 		}
 
 		By(fmt.Sprintf("configure storage profile %s", f.CsiCloneSCName))
-		configureCloneStrategy(f.CrClient, f.CsiCloneSCName, originalProfileSpec)
+		utils.ConfigureCloneStrategy(f.CrClient, f.CdiClient, f.CsiCloneSCName, originalProfileSpec, cdiv1.CloneStrategyCsiClone)
 		sourcePvc := createAndPopulateSourcePVC("dv-smart-clone-test-1", v1.PersistentVolumeFilesystem, f.CsiCloneSCName, f)
 		pod, err := f.CreateExecutorPodWithPVC("temp-pod", f.Namespace.Name, sourcePvc)
 		Expect(err).ToNot(HaveOccurred())
@@ -152,15 +121,3 @@ var _ = Describe("[vendor:cnv-qe@redhat.com][level:component][crit:high] CSI Vol
 		verifyPVC(dataVolume, f, utils.DefaultPvcMountPath, utils.TinyCoreBlockMD5)
 	})
 })
-
-func updateCloneStrategy(originalProfileSpec *cdiv1.StorageProfileSpec, cloneStrategy cdiv1.CDICloneStrategy) *cdiv1.StorageProfileSpec {
-	newProfileSpec := originalProfileSpec.DeepCopy()
-
-	if len(newProfileSpec.ClaimPropertySets) == 0 {
-		newProfileSpec.ClaimPropertySets = []cdiv1.ClaimPropertySet{{CloneStrategy: &cloneStrategy}}
-	} else {
-		newProfileSpec.ClaimPropertySets[0].CloneStrategy = &cloneStrategy
-	}
-
-	return newProfileSpec
-}

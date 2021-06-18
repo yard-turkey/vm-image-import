@@ -148,6 +148,8 @@ const (
 	MessageSmartCloneInProgress = "Creating snapshot for smart-clone is in progress (for pvc %s/%s)"
 	// MessageSmartClonePVCInProgress provides a const to form snapshot for smart-clone is in progress message
 	MessageSmartClonePVCInProgress = "Creating PVC for smart-clone is in progress (for pvc %s/%s)"
+	// MessageCsiCloneInProgress provides a const to form a CSI Volume Clone in progress message
+	MessageCsiCloneInProgress = "CSI Volume clone in progress (for pvc %s/%s)"
 	// MessageUploadScheduled provides a const to form upload is scheduled message
 	MessageUploadScheduled = "Upload into %s scheduled"
 	// MessageUploadReady provides a const to form upload is ready message
@@ -582,6 +584,54 @@ func (r *DatavolumeReconciler) reconcileCsiClonePvc(log logr.Logger,
 	datavolume *cdiv1.DataVolume,
 	pvcSpec *corev1.PersistentVolumeClaimSpec,
 	transferName string) (reconcile.Result, error) {
+	pvcName := datavolume.Name
+
+	if isCrossNamespaceClone(datavolume) {
+		pvcName = transferName
+		initialized, err := r.initTransfer(log, datavolume, pvcName)
+		if err != nil {
+			return reconcile.Result{}, err
+		}
+
+		// get reconciled again v soon
+		if !initialized {
+			return reconcile.Result{},
+				r.updateCloneStatusPhase(cdiv1.CloneScheduled, datavolume, nil, "csivolumeclone")
+		}
+
+		tmpPVC := &corev1.PersistentVolumeClaim{}
+		nn := types.NamespacedName{Namespace: datavolume.Spec.Source.PVC.Namespace, Name: pvcName}
+		if err := r.client.Get(context.TODO(), nn, tmpPVC); err != nil {
+			if !k8serrors.IsNotFound(err) {
+				return reconcile.Result{}, err
+			}
+		} else if (datavolume.Status.Phase == cdiv1.CSICloneInProgress || datavolume.Status.Phase == cdiv1.ExpansionInProgress) &&
+			tmpPVC.Annotations[AnnCloneOf] == "true" {
+			done, err := r.expand(log, datavolume, tmpPVC, pvcSpec)
+			if err != nil {
+				return reconcile.Result{}, err
+			}
+
+			if !done {
+				return reconcile.Result{Requeue: true},
+					r.updateCloneStatusPhase(cdiv1.ExpansionInProgress, datavolume, nil, "csivolumeclone")
+			}
+
+			// trigger transfer and next reconcile should have pvcExists == true
+			tmpPVC.Annotations[annReadyForTransfer] = "true"
+			tmpPVC.Annotations[AnnPopulatedFor] = datavolume.Name
+			if err := r.client.Update(context.TODO(), tmpPVC); err != nil {
+				return reconcile.Result{}, err
+			}
+
+			return reconcile.Result{},
+				r.updateCloneStatusPhase(cdiv1.NamespaceTransferInProgress, datavolume, nil, "csivolumeclone")
+		}
+	}
+
+	if datavolume.Status.Phase == cdiv1.NamespaceTransferInProgress {
+		return reconcile.Result{}, nil
+	}
 
 	sourcePvcNs := datavolume.Spec.Source.PVC.Namespace
 	if sourcePvcNs == "" {
@@ -609,32 +659,33 @@ func (r *DatavolumeReconciler) reconcileCsiClonePvc(log logr.Logger,
 	}
 	if inUse || !populated {
 		return reconcile.Result{Requeue: true},
-			r.updateCSICloneDataVolumeStatus(cdiv1.CloneScheduled, datavolume)
+			r.updateCloneStatusPhase(cdiv1.CloneScheduled, datavolume, nil, "csivolumeclone")
 	}
 
-	cloneTargetPvc := newVolumeClonePVC(datavolume, pvcSpec)
+	// here use Temp PVC!!!
+	cloneTargetPvc := newVolumeClonePVC(datavolume, sourcePvc, pvcSpec, pvcName)
 
 	pvcClash := &corev1.PersistentVolumeClaim{}
-	if err := r.client.Get(context.TODO(), types.NamespacedName{Namespace: cloneTargetPvc.Namespace, Name: cloneTargetPvc.Name}, pvcClash); err != nil && !k8serrors.IsNotFound(err) {
-		return reconcile.Result{}, err
-	}
-
-	pvcControllerRef := metav1.GetControllerOf(cloneTargetPvc)
-	pvcClashControllerRef := metav1.GetControllerOf(pvcClash)
-
-	if pvcClash.Name == cloneTargetPvc.Name &&
-		pvcClash.Namespace == cloneTargetPvc.Namespace &&
-		!reflect.DeepEqual(pvcControllerRef, pvcClashControllerRef) {
-		return reconcile.Result{}, errors.Errorf("Target Pvc Name in use") //r.updateCSICloneDataVolumeStatus(cdiv1.ClonePVCNameInUse, datavolume)
-	}
-
-	if err := r.client.Create(context.TODO(), cloneTargetPvc); err != nil {
-		if k8serrors.IsAlreadyExists(err) {
-			return reconcile.Result{}, nil
+	if err := r.client.Get(context.TODO(), types.NamespacedName{Namespace: cloneTargetPvc.Namespace, Name: cloneTargetPvc.Name}, pvcClash); err != nil {
+		if !k8serrors.IsNotFound(err) {
+			return reconcile.Result{}, err
 		}
-		return reconcile.Result{}, err
+		if err := r.client.Create(context.TODO(), cloneTargetPvc); err != nil && !k8serrors.IsAlreadyExists(err) {
+			return reconcile.Result{}, err
+		}
+	} else {
+		// PVC already exists, check for name clash
+		pvcControllerRef := metav1.GetControllerOf(cloneTargetPvc)
+		pvcClashControllerRef := metav1.GetControllerOf(pvcClash)
+
+		if pvcClash.Name == cloneTargetPvc.Name &&
+			pvcClash.Namespace == cloneTargetPvc.Namespace &&
+			!reflect.DeepEqual(pvcControllerRef, pvcClashControllerRef) {
+			return reconcile.Result{}, errors.Errorf("Target Pvc Name in use") //r.updateCSICloneDataVolumeStatus(cdiv1.ClonePVCNameInUse, datavolume)
+		}
 	}
-	return reconcile.Result{}, r.updateCSICloneDataVolumeStatus(cdiv1.CSICloneInProgress, datavolume)
+
+	return reconcile.Result{Requeue: true}, r.updateCloneStatusPhase(cdiv1.CSICloneInProgress, datavolume, nil, "csivolumeclone")
 }
 
 func (r *DatavolumeReconciler) reconcileCsiCloneForExistingPvc(log logr.Logger,
@@ -642,18 +693,36 @@ func (r *DatavolumeReconciler) reconcileCsiCloneForExistingPvc(log logr.Logger,
 	pvc *corev1.PersistentVolumeClaim,
 	pvcSpec *corev1.PersistentVolumeClaimSpec,
 	transferName string) (reconcile.Result, error) {
+	if isCrossNamespaceClone(datavolume) && datavolume.Status.Phase == cdiv1.Succeeded {
+		if err := r.cleanupTransfer(log, datavolume, transferName); err != nil {
+			return reconcile.Result{}, err
+		}
 
-	//DO Nothing, not yet ready
-	if pvc.Annotations[AnnCloneOf] != "true" {
-		log.Info("CsiClone reconcileCsiCloneForExistingPvc pvc.Annotations[AnnCloneOf]=false")
+		// done, done
 		return reconcile.Result{}, nil
 	}
 
+	//DO Nothing, not yet ready
+	if pvc.Annotations[AnnCloneOf] != "true" {
+		return reconcile.Result{}, r.updateCloneStatusPhase(cdiv1.CSICloneInProgress, datavolume, nil, "csivolumeclone")
+	}
+
+	// expand for non-namespace case
+	done, err := r.expand(log, datavolume, pvc, pvcSpec)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+	if !done {
+		return reconcile.Result{Requeue: true},
+			r.updateCloneStatusPhase(cdiv1.ExpansionInProgress, datavolume, pvc, "csivolumeclone")
+	}
+
 	return reconcile.Result{},
-		r.updateCSICloneDataVolumeStatus(cdiv1.Succeeded, datavolume)
+		r.updateCloneStatusPhase(cdiv1.Succeeded, datavolume, pvc, "csivolumeclone")
 }
 
-func (r *DatavolumeReconciler) reconcileSmartClonePvc(log logr.Logger, datavolume *cdiv1.DataVolume, pvcSpec *corev1.PersistentVolumeClaimSpec, transferName string, snapshotClassName string) (reconcile.Result, error) {
+func (r *DatavolumeReconciler) reconcileSmartClonePvc(log logr.Logger, datavolume *cdiv1.DataVolume,
+	pvcSpec *corev1.PersistentVolumeClaimSpec, transferName string, snapshotClassName string) (reconcile.Result, error) {
 	pvcName := datavolume.Name
 	if isCrossNamespaceClone(datavolume) {
 		pvcName = transferName
@@ -665,7 +734,7 @@ func (r *DatavolumeReconciler) reconcileSmartClonePvc(log logr.Logger, datavolum
 		// get reconciled again v soon
 		if !initialized {
 			return reconcile.Result{},
-				r.updateSmartCloneStatusPhase(cdiv1.CloneScheduled, datavolume, nil)
+				r.updateCloneStatusPhase(cdiv1.CloneScheduled, datavolume, nil, "snapshot")
 		}
 
 		tmpPVC := &corev1.PersistentVolumeClaim{}
@@ -681,7 +750,7 @@ func (r *DatavolumeReconciler) reconcileSmartClonePvc(log logr.Logger, datavolum
 			}
 			if !done {
 				return reconcile.Result{},
-					r.updateSmartCloneStatusPhase(cdiv1.ExpansionInProgress, datavolume, nil)
+					r.updateCloneStatusPhase(cdiv1.ExpansionInProgress, datavolume, nil, "snapshot")
 			}
 
 			// trigger transfer and next reconcile should have pvcExists == true
@@ -692,7 +761,7 @@ func (r *DatavolumeReconciler) reconcileSmartClonePvc(log logr.Logger, datavolum
 			}
 
 			return reconcile.Result{},
-				r.updateSmartCloneStatusPhase(cdiv1.NamespaceTransferInProgress, datavolume, nil)
+				r.updateCloneStatusPhase(cdiv1.NamespaceTransferInProgress, datavolume, nil, "snapshot")
 		} else {
 			return reconcile.Result{}, nil
 		}
@@ -726,7 +795,7 @@ func (r *DatavolumeReconciler) reconcileSmartClonePvc(log logr.Logger, datavolum
 		}
 		if inUse || !populated {
 			return reconcile.Result{Requeue: true},
-				r.updateSmartCloneStatusPhase(cdiv1.CloneScheduled, datavolume, nil)
+				r.updateCloneStatusPhase(cdiv1.CloneScheduled, datavolume, nil, "snapshot")
 		}
 
 		if err := r.client.Create(context.TODO(), newSnapshot); err != nil {
@@ -738,13 +807,17 @@ func (r *DatavolumeReconciler) reconcileSmartClonePvc(log logr.Logger, datavolum
 		}
 
 		return reconcile.Result{},
-			r.updateSmartCloneStatusPhase(cdiv1.SnapshotForSmartCloneInProgress, datavolume, nil)
+			r.updateCloneStatusPhase(cdiv1.SnapshotForSmartCloneInProgress, datavolume, nil, "snapshot")
 	}
 
 	return reconcile.Result{}, nil
 }
 
-func (r *DatavolumeReconciler) reconcileSmartCloneForExistingPvc(log logr.Logger, datavolume *cdiv1.DataVolume, pvc *corev1.PersistentVolumeClaim, pvcSpec *corev1.PersistentVolumeClaimSpec, transferName string) (reconcile.Result, error) {
+func (r *DatavolumeReconciler) reconcileSmartCloneForExistingPvc(log logr.Logger,
+	datavolume *cdiv1.DataVolume,
+	pvc *corev1.PersistentVolumeClaim,
+	pvcSpec *corev1.PersistentVolumeClaimSpec,
+	transferName string) (reconcile.Result, error) {
 	if isCrossNamespaceClone(datavolume) && datavolume.Status.Phase == cdiv1.Succeeded {
 		if err := r.cleanupTransfer(log, datavolume, transferName); err != nil {
 			return reconcile.Result{}, err
@@ -765,11 +838,11 @@ func (r *DatavolumeReconciler) reconcileSmartCloneForExistingPvc(log logr.Logger
 	}
 	if !done {
 		return reconcile.Result{},
-			r.updateSmartCloneStatusPhase(cdiv1.ExpansionInProgress, datavolume, pvc)
+			r.updateCloneStatusPhase(cdiv1.ExpansionInProgress, datavolume, pvc, "snapshot")
 	}
 
 	// done
-	return reconcile.Result{}, r.updateSmartCloneStatusPhase(cdiv1.Succeeded, datavolume, pvc)
+	return reconcile.Result{}, r.updateCloneStatusPhase(cdiv1.Succeeded, datavolume, pvc, "snapshot")
 }
 
 func (r *DatavolumeReconciler) getVddkAnnotations(dataVolume *cdiv1.DataVolume, pvc *corev1.PersistentVolumeClaim) (bool, error) {
@@ -1117,8 +1190,10 @@ func expansionPodName(pvc *corev1.PersistentVolumeClaim) string {
 	return "cdi-expand-" + string(pvc.UID)
 }
 
-func (r *DatavolumeReconciler) expand(log logr.Logger, dv *cdiv1.DataVolume,
-	pvc *corev1.PersistentVolumeClaim, targetSpec *corev1.PersistentVolumeClaimSpec) (bool, error) {
+func (r *DatavolumeReconciler) expand(log logr.Logger,
+	dv *cdiv1.DataVolume,
+	pvc *corev1.PersistentVolumeClaim,
+	targetSpec *corev1.PersistentVolumeClaimSpec) (bool, error) {
 	if pvc.Status.Phase != corev1.ClaimBound {
 		return false, fmt.Errorf("cannot expand volume in %q phase", pvc.Status.Phase)
 	}
@@ -1564,8 +1639,7 @@ func newSnapshot(dataVolume *cdiv1.DataVolume, snapshotName, snapshotClassName s
 }
 
 // NewVolumeClonePVC creates a PVC object to be used during CSI volume cloning. csiClonePvcType defines whether the PVC object will be a source cloner PVC or the target PVC
-func newVolumeClonePVC(dv *cdiv1.DataVolume,
-	targetPvcSpec *corev1.PersistentVolumeClaimSpec) *corev1.PersistentVolumeClaim {
+func newVolumeClonePVC(dv *cdiv1.DataVolume, sourcePvc *corev1.PersistentVolumeClaim, targetPvcSpec *corev1.PersistentVolumeClaimSpec, pvcName string) *corev1.PersistentVolumeClaim {
 	annotations := make(map[string]string)
 	for ann, v := range dv.GetAnnotations() {
 		annotations[ann] = v
@@ -1578,7 +1652,7 @@ func newVolumeClonePVC(dv *cdiv1.DataVolume,
 
 	pvc := corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      dv.Name,
+			Name:      pvcName,
 			Namespace: pvcNamespace,
 			Labels: map[string]string{
 				common.CDILabelKey:       common.CDILabelValue,
@@ -1600,6 +1674,13 @@ func newVolumeClonePVC(dv *cdiv1.DataVolume,
 			Resources:        targetPvcSpec.Resources,
 		},
 	}
+
+	// take source size while cloning
+	if pvc.Spec.Resources.Requests == nil {
+		pvc.Spec.Resources.Requests = corev1.ResourceList{}
+	}
+	sourceSize := sourcePvc.Status.Capacity.Storage()
+	pvc.Spec.Resources.Requests[corev1.ResourceStorage] = *sourceSize
 
 	// temporary name? pvc.Name = fmt.Sprintf("%s-%s", dv.Namespace, dv.Name)
 	pvc.Spec.DataSource = &corev1.TypedLocalObjectReference{
@@ -1650,37 +1731,10 @@ func (r *DatavolumeReconciler) updateImportStatusPhase(pvc *corev1.PersistentVol
 	}
 }
 
-func (r *DatavolumeReconciler) updateCSICloneDataVolumeStatus(phase cdiv1.DataVolumePhase, dataVolume *cdiv1.DataVolume) error {
-	dataVolumeCopy := dataVolume.DeepCopy()
-	event := DataVolumeEvent{}
-	switch phase {
-	case cdiv1.CloneScheduled:
-		dataVolumeCopy.Status.Phase = cdiv1.CloneScheduled
-		event.eventType = corev1.EventTypeNormal
-		event.reason = CloneScheduled
-		event.message = fmt.Sprintf(MessageCloneScheduled, dataVolumeCopy.Spec.Source.PVC.Namespace, dataVolumeCopy.Spec.Source.PVC.Name, dataVolume.Namespace, dataVolume.Name)
-	case cdiv1.CSICloneInProgress:
-		dataVolumeCopy.Status.Phase = cdiv1.CSICloneInProgress
-		event.eventType = corev1.EventTypeNormal
-		event.reason = string(cdiv1.CSICloneInProgress)
-		event.message = "CSI clone in progress. Creating clone PVC"
-		// TODO: claimLost
-		//case cdiv1.CloneSourcePVCLost:
-		//	dvCopy.Status.Phase = cdiv1.CloneSourcePVCLost
-		//	event.eventType = corev1.EventTypeWarning
-		//	event.reason = string(cdiv1.CloneSourcePVCLost)
-		//	event.message = fmt.Sprintf("Source PVC %s no longer exists", dataVolume.Spec.Source.PVC.Name)
-	case cdiv1.Succeeded:
-		dataVolumeCopy.Status.Phase = cdiv1.Succeeded
-		event.eventType = corev1.EventTypeNormal
-		event.reason = CloneSucceeded
-		event.message = fmt.Sprintf(MessageCloneSucceeded, dataVolume.Spec.Source.PVC.Namespace, dataVolume.Spec.Source.PVC.Name, dataVolume.Namespace, dataVolume.Name)
-	}
-
-	return r.emitEvent(dataVolume, dataVolumeCopy, dataVolume.Status.Phase, dataVolume.Status.Conditions, &event)
-}
-
-func (r *DatavolumeReconciler) updateSmartCloneStatusPhase(phase cdiv1.DataVolumePhase, dataVolume *cdiv1.DataVolume, pvc *corev1.PersistentVolumeClaim) error {
+func (r *DatavolumeReconciler) updateCloneStatusPhase(phase cdiv1.DataVolumePhase,
+	dataVolume *cdiv1.DataVolume,
+	pvc *corev1.PersistentVolumeClaim,
+	cloneType string) error {
 	var dataVolumeCopy = dataVolume.DeepCopy()
 	var event DataVolumeEvent
 
@@ -1697,6 +1751,11 @@ func (r *DatavolumeReconciler) updateSmartCloneStatusPhase(phase cdiv1.DataVolum
 		event.eventType = corev1.EventTypeNormal
 		event.reason = SnapshotForSmartCloneInProgress
 		event.message = fmt.Sprintf(MessageSmartCloneInProgress, dataVolumeCopy.Spec.Source.PVC.Namespace, dataVolumeCopy.Spec.Source.PVC.Name)
+	case cdiv1.CSICloneInProgress:
+		dataVolumeCopy.Status.Phase = cdiv1.CSICloneInProgress
+		event.eventType = corev1.EventTypeNormal
+		event.reason = string(cdiv1.CSICloneInProgress)
+		event.message = fmt.Sprintf(MessageCsiCloneInProgress, dataVolumeCopy.Spec.Source.PVC.Namespace, dataVolumeCopy.Spec.Source.PVC.Name)
 	case cdiv1.ExpansionInProgress:
 		dataVolumeCopy.Status.Phase = cdiv1.ExpansionInProgress
 		event.eventType = corev1.EventTypeNormal
@@ -1716,23 +1775,21 @@ func (r *DatavolumeReconciler) updateSmartCloneStatusPhase(phase cdiv1.DataVolum
 
 	r.updateConditions(dataVolumeCopy, pvc)
 
-	addAnnotation(dataVolumeCopy, annCloneType, "snapshot")
+	addAnnotation(dataVolumeCopy, annCloneType, cloneType)
 
 	return r.emitEvent(dataVolume, dataVolumeCopy, curPhase, dataVolume.Status.Conditions, &event)
 }
 
-func (r *DatavolumeReconciler) updateCloneStatusPhase(pvc *corev1.PersistentVolumeClaim, dataVolumeCopy *cdiv1.DataVolume, event *DataVolumeEvent) {
+func (r *DatavolumeReconciler) updateNetworkCloneStatusPhase(pvc *corev1.PersistentVolumeClaim, dataVolumeCopy *cdiv1.DataVolume, event *DataVolumeEvent) {
 	phase, ok := pvc.Annotations[AnnPodPhase]
 	if ok {
 		switch phase {
 		case string(corev1.PodPending):
-			// TODO: Use a more generic Scheduled, like maybe TransferScheduled.
 			dataVolumeCopy.Status.Phase = cdiv1.CloneScheduled
 			event.eventType = corev1.EventTypeNormal
 			event.reason = CloneScheduled
 			event.message = fmt.Sprintf(MessageCloneScheduled, dataVolumeCopy.Spec.Source.PVC.Namespace, dataVolumeCopy.Spec.Source.PVC.Name, pvc.Namespace, pvc.Name)
 		case string(corev1.PodRunning):
-			// TODO: Use a more generic In Progess, like maybe TransferInProgress.
 			dataVolumeCopy.Status.Phase = cdiv1.CloneInProgress
 			event.eventType = corev1.EventTypeNormal
 			event.reason = CloneInProgress
@@ -1807,7 +1864,7 @@ func (r *DatavolumeReconciler) reconcileDataVolumeStatus(dataVolume *cdiv1.DataV
 			_, ok := pvc.Annotations[AnnCloneRequest]
 			if ok {
 				dataVolumeCopy.Status.Phase = cdiv1.CloneScheduled
-				r.updateCloneStatusPhase(pvc, dataVolumeCopy, &event)
+				r.updateNetworkCloneStatusPhase(pvc, dataVolumeCopy, &event)
 				updateImport = false
 			}
 			_, ok = pvc.Annotations[AnnUploadRequest]
@@ -1889,7 +1946,7 @@ func (r *DatavolumeReconciler) reconcileDataVolumeStatus(dataVolume *cdiv1.DataV
 					_, ok = pvc.Annotations[AnnCloneRequest]
 					if ok {
 						dataVolumeCopy.Status.Phase = cdiv1.CloneScheduled
-						r.updateCloneStatusPhase(pvc, dataVolumeCopy, &event)
+						r.updateNetworkCloneStatusPhase(pvc, dataVolumeCopy, &event)
 					}
 					_, ok = pvc.Annotations[AnnUploadRequest]
 					if ok {
@@ -2221,7 +2278,7 @@ func (r *DatavolumeReconciler) newPersistentVolumeClaim(dataVolume *cdiv1.DataVo
 // RenderPvcSpec creates a new PVC Spec based on either the dv.spec.pvc or dv.spec.storage section
 func RenderPvcSpec(client client.Client, recorder record.EventRecorder, log logr.Logger, dv *cdiv1.DataVolume) (*corev1.PersistentVolumeClaimSpec, error) {
 	if dv.Spec.PVC != nil {
-		return dv.Spec.PVC, nil
+		return dv.Spec.PVC.DeepCopy(), nil
 	}
 
 	if dv.Spec.Storage != nil {

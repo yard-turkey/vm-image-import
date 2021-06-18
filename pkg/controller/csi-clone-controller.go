@@ -132,5 +132,9 @@ func (r *CSICloneReconciler) reconcilePvc(log logr.Logger, pvc *corev1.Persisten
 	}
 
 	// TODO: is there any work for ClaimLost, and ClaimPending
+	// update annotations / events
+	log.WithValues("pvc.Name", pvc.Name).
+		WithValues("pvc.Namespace", pvc.Namespace).
+		Info("--> NOP PVC Pending")
 	return reconcile.Result{}, nil
 }
