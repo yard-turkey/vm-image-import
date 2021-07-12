@@ -221,6 +221,19 @@ func createAlphaV1DataVolumeCRDSchema() *extv1.CustomResourceValidation {
 										"url",
 									},
 								},
+								"gcs": {
+									Description: "DataVolumeSourceGCS provides the parameters to create a Data Volume from a GCS source",
+									Type:        "object",
+									Properties: map[string]extv1.JSONSchemaProps{
+										"url": {
+											Description: "URL is the url of the GCS source",
+											Type:        "string",
+										},
+									},
+									Required: []string{
+										"url",
+									},
+								},
 								"imageio": {
 									Description: "DataVolumeSourceImageIO provides the parameters to create a Data Volume from an imageio source",
 									Type:        "object",
